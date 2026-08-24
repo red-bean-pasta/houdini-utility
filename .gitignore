@@ -1,0 +1,18 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.python-version
+
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+backup/
+
+*.hipnc
+*.hip
