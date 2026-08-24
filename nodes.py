@@ -10,7 +10,7 @@ from common import add_attr, remove_attrs
 def sopify(
     parent: hou.SopNode,
     input_node: hou.SopNode | None,
-    function: Callable[[], None] | Callable[[hou.SopNode | None], None]
+    function: Callable[[], None] | Callable[[hou.SopNode], None]
 ) -> hou.SopNode:
     """Generate a Python SOP node invoking a given module-level python function."""
     assert "<locals>" not in function.__qualname__, "Python SOP functions must be module-level functions"
@@ -31,8 +31,9 @@ def sopify(
     )
     return node
 
+
 def add_reloadable_subnet(
-        parent: hou.SopNode,
+        parent: hou.OpNode,
         name: str,
 ) -> hou.SopNode:
     subnet = parent.createNode("subnet", name)
@@ -46,7 +47,8 @@ def _add_reload_button(parent: hou.SopNode) -> hou.SopNode:
     reload_button = hou.ButtonParmTemplate(
         "reload",
         "Reload",
-        script_callback=(r'''
+        script_callback=inspect.cleandoc(r'''
+            import utilities
             import developing
             developing.reload_modules()
             subnet = kwargs['node'].parent()

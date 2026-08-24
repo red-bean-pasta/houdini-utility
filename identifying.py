@@ -3,7 +3,7 @@ Utility functions for attribute-based identification, naming, and indexing of ge
 """
 import re
 from collections import defaultdict
-from typing import Sequence, Callable
+from typing import Sequence, Callable, Literal
 
 import hou
 
@@ -86,7 +86,7 @@ def rename_point_attr(
         geo: hou.Geometry,
         attribute: str,
         filtrate: Callable[[hou.Point], bool],
-        rename: Callable[[str], str | False],
+        rename: Callable[[str], str | Literal[False]],
 ) -> None:
     """Conditionally rename point attribute values matching a filter.
 

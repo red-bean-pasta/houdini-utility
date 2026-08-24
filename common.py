@@ -15,26 +15,26 @@ def affix_attribute_value(prefix: str, *affixes: int | str) -> str:
     return prefix + "_".join(map(str, affixes))
 
 
-def get_parent(node: hou.SopNode) -> hou.Node:
+def get_parent(node: hou.Node) -> hou.OpNode:
     parent = node.parent()
-    assert isinstance(parent, (hou.SopNode, hou.ObjNode, hou.Node)), "Expected Python SOP to be inside a valid network"
+    assert isinstance(parent, hou.OpNode), "Expected Python SOP to be inside a valid network"
     return parent
 
 
-def get_float_parm(node: hou.SopNode, name: str) -> float:
+def get_float_parm(node: hou.OpNode, name: str) -> float:
     return get_parm(node, name, float)
 
-def get_vector2_parm(node: hou.SopNode, name: str) -> hou.Vector2:
+def get_vector2_parm(node: hou.OpNode, name: str) -> hou.Vector2:
     return hou.Vector2(
         get_parm(node, name, tuple[float, float])
     )
 
-def get_vector3_parm(node: hou.SopNode, name: str) -> hou.Vector3:
+def get_vector3_parm(node: hou.OpNode, name: str) -> hou.Vector3:
     return hou.Vector3(
         get_parm(node, name, tuple[float, float, float])
     )
 
-def get_parm(node: hou.SopNode, name: str, cls: type[T]) -> T:
+def get_parm(node: hou.OpNode, name: str, cls: type[T]) -> T:
     runtime_type = get_origin(cls) or cls
 
     if runtime_type is tuple:
@@ -90,6 +90,9 @@ def add_point_attr(geo: hou.Geometry, name: str, default: Any) -> hou.Attrib:
 
 def add_prim_attr(geo: hou.Geometry, name: str, default: Any) -> hou.Attrib:
     return add_attr(geo, hou.attribType.Prim, name, default)
+
+def add_global_attr(geo: hou.Geometry, name: str, default: Any) -> hou.Attrib:
+    return add_attr(geo, hou.attribType.Global, name, default)
 
 def add_attr(
         geo: hou.Geometry,
