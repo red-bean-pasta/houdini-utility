@@ -153,7 +153,7 @@ def interpolate_conic(
     :param slope0: Tangent vector at p0.
     :param slope1: Tangent vector at p1.
     :return: A function that accepts a signed distance along the p0->p1 axis,
-             and returns 0, 1, or 2 point and tagent direction pairs in 3D space on the conic.
+             and returns 0, 1, or 2 point and normal pairs in 3D space on the conic.
     """
     vector0 = p0.position() if isinstance(p0, hou.Point) else hou.Vector3(p0)
     vector1 = p1.position() if isinstance(p1, hou.Point) else hou.Vector3(p1)
@@ -207,19 +207,22 @@ def interpolate_conic(
         return vector0 + along * along_axis + across * across_axis
 
     def evaluate(along: float) -> tuple[tuple[hou.Vector3, hou.Vector3], ...]:
-        def get_point_and_tagent(p_across: float) -> tuple[hou.Vector3, hou.Vector3]:
+        def get_point_and_normal(p_across: float) -> tuple[hou.Vector3, hou.Vector3]:
             gradient_along = 2.0 * A * along + B * p_across + D
             gradient_across = B * along + 2.0 * C * p_across + E
-            tangent_along = gradient_across
-            tangent_across = -gradient_along
-            tangent = (
-                along_axis * tangent_across
-                + across_axis * tangent_along
+            curvature = (
+               ( 2.0 * A) * gradient_across ** 2
+                - 2.0 * B * gradient_along * gradient_across
+                + (2.0 * C) * gradient_along ** 2
+            )
+            point_normal = (
+                along_axis * gradient_along
+                + across_axis * gradient_across
             ).normalized()
-            if tangent.dot(along_axis) < 0.0:
-                tangent = -tangent
+            if curvature > 0.0:
+                point_normal = -point_normal
             point = to_3d(along, p_across)
-            return point, tangent
+            return point, point_normal
 
         quadratic = C
         linear = B * along + E
@@ -230,7 +233,7 @@ def interpolate_conic(
             if abs(linear) <= eps:
                 return ()
             across = -constant / linear
-            return get_point_and_tagent(across),
+            return get_point_and_normal(across),
 
         discriminant = linear**2 - 4.0 * quadratic * constant
         if discriminant < -eps:
@@ -238,11 +241,11 @@ def interpolate_conic(
 
         if abs(discriminant) <= eps:
             across = -linear / (2.0 * quadratic)
-            return get_point_and_tagent(across),
+            return get_point_and_normal(across),
 
         sqrt_discriminant = math.sqrt(discriminant)
         across0 = (-linear + sqrt_discriminant) / (2.0 * quadratic)
         across1 = (-linear - sqrt_discriminant) / (2.0 * quadratic)
-        return get_point_and_tagent(across0), get_point_and_tagent(across1)
+        return get_point_and_normal(across0), get_point_and_normal(across1)
 
     return evaluate
