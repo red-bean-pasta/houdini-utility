@@ -47,16 +47,23 @@ def _add_reload_button(parent: hou.SopNode) -> hou.SopNode:
     reload_button = hou.ButtonParmTemplate(
         "reload",
         "Reload",
-        script_callback=inspect.cleandoc(r'''
+        script_callback=inspect.cleandoc(r"""
+            import hou
             import utilities
             import developing
+
             developing.reload_modules()
             subnet = kwargs['node'].parent()
             if subnet:
                 for child in subnet.allSubChildren():
-                    child.cook(force=True)
+                    try:
+                        child.cook(force=True)
+                    except hou.OperationFailed:
+                        errors = "\n".join(child.errors())
+                        print(f"Error cooking node '{child.path()}':\n{errors}")
+                        raise
                 subnet.cook(force=True)
-        '''),
+        """),
         script_callback_language=hou.scriptLanguage.Python,
     )
     templates.append(reload_button)
