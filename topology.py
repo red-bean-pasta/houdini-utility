@@ -135,7 +135,7 @@ def interpolate_conic(
         p2: hou.Vector3 | hou.Point,
         slope0: hou.Vector3,
         slope1: hou.Vector3,
-) -> Callable[[float], tuple[hou.Vector3, ...]]:
+) -> Callable[[float], tuple[tuple[hou.Vector3, hou.Vector3], ...]]:
     """Construct a planar conic passing through p0, p1, p2 with tangents slope0 at p0 and slope1 at p1.
 
     The method projects the 3D problem into a 2D local orthonormal coordinate plane:
@@ -153,7 +153,7 @@ def interpolate_conic(
     :param slope0: Tangent vector at p0.
     :param slope1: Tangent vector at p1.
     :return: A function that accepts a signed distance along the p0->p1 axis,
-             and returns the 0, 1, or 2 3D points on the conic.
+             and returns 0, 1, or 2 point and tagent direction pairs in 3D space on the conic.
     """
     vector0 = p0.position() if isinstance(p0, hou.Point) else hou.Vector3(p0)
     vector1 = p1.position() if isinstance(p1, hou.Point) else hou.Vector3(p1)
@@ -206,7 +206,21 @@ def interpolate_conic(
     def to_3d(along: float, across: float) -> hou.Vector3:
         return vector0 + along * along_axis + across * across_axis
 
-    def evaluate(along: float) -> tuple[hou.Vector3, ...]:
+    def evaluate(along: float) -> tuple[tuple[hou.Vector3, hou.Vector3], ...]:
+        def get_point_and_tagent(p_across: float) -> tuple[hou.Vector3, hou.Vector3]:
+            gradient_along = 2.0 * A * along + B * p_across + D
+            gradient_across = B * along + 2.0 * C * p_across + E
+            tangent_along = gradient_across
+            tangent_across = -gradient_along
+            tangent = (
+                along_axis * tangent_across
+                + across_axis * tangent_along
+            ).normalized()
+            if tangent.dot(along_axis) < 0.0:
+                tangent = -tangent
+            point = to_3d(along, p_across)
+            return point, tangent
+
         quadratic = C
         linear = B * along + E
         constant = A * along**2 + D * along
@@ -216,7 +230,7 @@ def interpolate_conic(
             if abs(linear) <= eps:
                 return ()
             across = -constant / linear
-            return (to_3d(along, across),)
+            return get_point_and_tagent(across),
 
         discriminant = linear**2 - 4.0 * quadratic * constant
         if discriminant < -eps:
@@ -224,11 +238,11 @@ def interpolate_conic(
 
         if abs(discriminant) <= eps:
             across = -linear / (2.0 * quadratic)
-            return (to_3d(along, across),)
+            return get_point_and_tagent(across),
 
         sqrt_discriminant = math.sqrt(discriminant)
         across0 = (-linear + sqrt_discriminant) / (2.0 * quadratic)
         across1 = (-linear - sqrt_discriminant) / (2.0 * quadratic)
-        return to_3d(along, across0), to_3d(along, across1)
+        return get_point_and_tagent(across0), get_point_and_tagent(across1)
 
     return evaluate
