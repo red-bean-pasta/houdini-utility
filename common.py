@@ -1,3 +1,4 @@
+import math
 from collections import defaultdict
 from typing import get_origin, TypeVar, get_args, Any, Sequence
 
@@ -210,6 +211,19 @@ def fill_face(
         polygon.addVertex(point)
     return polygon
 
+def get_prim_normal(prim: hou.Prim) -> hou.Vector3:
+    if isinstance(prim, hou.Face):
+        return prim.normal()
+    pts = [v.point().position() for v in prim.vertices()]
+    n = hou.Vector3()
+    for i, p in enumerate(pts):
+        q = pts[(i + 1) % len(pts)]
+        n += hou.Vector3(
+            (p[1] - q[1]) * (p[2] + q[2]),
+            (p[2] - q[2]) * (p[0] + q[0]),
+            (p[0] - q[0]) * (p[1] + q[1])
+        )
+    return -n.normalized()
 
 def get_prim_centroid(prims: hou.Prim | Sequence[hou.Prim]) -> hou.Vector3:
     if isinstance(prims, hou.Prim):
@@ -219,3 +233,9 @@ def get_prim_centroid(prims: hou.Prim | Sequence[hou.Prim]) -> hou.Vector3:
     for prim in prims:
         center += prim.boundingBox().center()
     return center / len(prims)
+
+
+def rotation_to(a: hou.Vector3, b: hou.Vector3) -> hou.Quaternion:
+    q = hou.Quaternion()
+    q.setToVectors(a, b)
+    return q
