@@ -133,10 +133,10 @@ def interpolate_conic(
         p0: hou.Vector3 | hou.Point,
         p1: hou.Vector3 | hou.Point,
         p2: hou.Vector3 | hou.Point,
-        slope0: hou.Vector3,
-        slope1: hou.Vector3,
+        normal0: hou.Vector3,
+        normal1: hou.Vector3,
 ) -> Callable[[float], tuple[tuple[hou.Vector3, hou.Vector3], ...]]:
-    """Construct a planar conic passing through p0, p1, p2 with tangents slope0 at p0 and slope1 at p1.
+    """Construct a planar conic passing through p0, p1, p2 with normals normal0 at p0 and normal1 at p1.
 
     The method projects the 3D problem into a 2D local orthonormal coordinate plane:
       - along_axis: direction from p0 to p1
@@ -144,14 +144,14 @@ def interpolate_conic(
     It sets up an algebraic conic equation:
       A * x² + B * x * y + C * y² + D * x + E * y = 0
     where (x, y) = (along, across) with p0 at (0, 0).
-    The remaining 4 constraints (passage through p1, p2, and tangent directions at p0, p1)
+    The remaining 4 constraints (passage through p1, p2, and normal directions at p0, p1)
     form a 4x5 linear system solved via SVD for the 1D null space.
 
     :param p0: First point on conic (origin of the local 2D coordinate system).
     :param p1: Second point on conic.
     :param p2: Intermediate third point on conic.
-    :param slope0: Tangent vector at p0.
-    :param slope1: Tangent vector at p1.
+    :param normal0: Inward normal vector at p0.
+    :param normal1: Inward normal vector at p1.
     :return: A function that accepts a signed distance along the p0->p1 axis,
              and returns 0, 1, or 2 point and normal pairs in 3D space on the conic.
     """
@@ -173,27 +173,27 @@ def interpolate_conic(
     along2 = delta02.dot(along_axis)
     across2 = delta02.dot(across_axis)
 
-    def project_slope(slope: hou.Vector3) -> tuple[float, float]:
-        tangent = slope - slope.dot(normal) * normal
-        assert tangent.length() != 0.0, "Slope must have a non-zero component in the conic plane"
-        tangent = tangent.normalized()
-        return tangent.dot(along_axis), tangent.dot(across_axis)
+    def project_normal(norm: hou.Vector3) -> tuple[float, float]:
+        proj = norm - norm.dot(normal) * normal
+        assert proj.length() != 0.0, "Normal must have a non-zero component in the conic plane"
+        proj = proj.normalized()
+        return proj.dot(along_axis), proj.dot(across_axis)
 
-    along_slope0, across_slope0 = project_slope(slope0)
-    along_slope1, across_slope1 = project_slope(slope1)
+    along_normal0, across_normal0 = project_normal(normal0)
+    along_normal1, across_normal1 = project_normal(normal1)
 
     # A*x² + B*x*y + C*y² + D*x + E*y = 0
     matrix = np.array([
         [along1**2, 0.0, 0.0, along1, 0.0],
         [along2**2, along2 * across2, across2**2, along2, across2],
-        [0.0, 0.0, 0.0, along_slope0, across_slope0],
-        [2.0 * along1 * along_slope1, along1 * across_slope1, 0.0, along_slope1, across_slope1],
+        [0.0, 0.0, 0.0, across_normal0, -along_normal0],
+        [2.0 * along1 * across_normal1, -along1 * along_normal1, 0.0, across_normal1, -along_normal1],
     ], dtype=float)
     _, singular_values, vh = np.linalg.svd(matrix)
     A, B, C, D, E = map(float, vh[-1])
 
     tolerance = np.finfo(float).eps * max(matrix.shape) * singular_values[0]
-    assert np.sum(singular_values > tolerance) == 4, "The supplied points and slopes do not determine a unique conic"
+    assert np.sum(singular_values > tolerance) == 4, "The supplied points and normals do not determine a unique conic"
 
     coefficient_scale = max(abs(A), abs(B), abs(C), abs(D), abs(E))
     assert coefficient_scale != 0.0, "Failed to construct a valid conic"
