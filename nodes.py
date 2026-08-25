@@ -51,18 +51,20 @@ def _add_reload_button(parent: hou.SopNode) -> hou.SopNode:
             import hou
             import utilities
             import developing
-
+            
+            node = hou.pwd()
+            
             developing.reload_modules()
-            subnet = kwargs['node'].parent()
+            
+            subnet = node.parent()
             if subnet:
-                for child in subnet.allSubChildren():
-                    try:
+                try:
+                    for child in subnet.allSubChildren():
                         child.cook(force=True)
-                    except hou.OperationFailed:
-                        errors = "\n".join(child.errors())
-                        print(f"Error cooking node '{child.path()}':\n{errors}")
-                        raise
-                subnet.cook(force=True)
+                    subnet.cook(force=True)
+                except Exception as e:
+                    node.addError(str(e))
+                    raise
         """),
         script_callback_language=hou.scriptLanguage.Python,
     )
