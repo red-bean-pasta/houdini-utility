@@ -249,3 +249,223 @@ def interpolate_conic(
         return get_point_and_normal(across0), get_point_and_normal(across1)
 
     return evaluate
+
+
+def interpolate_elliptical(
+        p0: hou.Vector3 | hou.Point,
+        p1: hou.Vector3 | hou.Point,
+        p2: hou.Vector3 | hou.Point,
+        normal0: hou.Vector3,
+        normal2: hou.Vector3,
+) -> Callable[[float], tuple[hou.Vector3, hou.Vector3]]:
+    """Construct a smooth elliptical 3D bulge passing through p0, p1, p2 with normals normal0 at p0 and normal2 at p2.
+
+    The middle point p1 is explicitly treated as the apex/tip of the bulge relative to the baseline from p0 to p2.
+    The curve is composed of two quintic polynomial segments (p0 -> p1 and p1 -> p2) joined at p1 with C² continuity.
+    Tangent magnitudes and apex curvature are chosen by minimizing jerk energy.
+
+    :param p0: Start point of the curve (t = 0.0).
+    :param p1: Apex/peak point of the curve (bulge tip).
+    :param p2: End point of the curve (t = 1.0).
+    :param normal0: Inward normal vector at p0.
+    :param normal2: Inward normal vector at p2.
+    :return: A function that accepts a normalized parameter t in [0, 1]
+            representing progress along the p0->p2 baseline chord axis (where 0.0 is p0 and 1.0 is p2),
+            and returns the (position, in-plane inward normal) pair as hou.Vector3.
+    """
+    p0_arr, p1_arr, p2_arr = _to_np(p0), _to_np(p1), _to_np(p2)
+    tangent_apex = _normalized(p2_arr - p0_arr)
+    chord_length = np.linalg.norm(p2_arr - p0_arr)
+    mid_along = float(np.dot(p1_arr - p0_arr, tangent_apex))
+
+    height_vec = (p1_arr - p0_arr) - mid_along * tangent_apex
+    height = np.linalg.norm(height_vec)
+    assert height > 1e-6, "p1 must not be collinear with p0 and p2"
+    outward = height_vec / height
+    inward = -outward
+
+    plane_normal = _normalized(np.cross(tangent_apex, outward))
+
+    d0 = _normalized(np.cross(plane_normal, _project_on_plane(_to_np(normal0), plane_normal)))
+    d2 = _normalized(np.cross(plane_normal, _project_on_plane(_to_np(normal2), plane_normal)))
+
+    def build_spline(parameters: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        endpoint_speed, apex_speed, apex_accel = np.exp(np.clip(parameters, -20.0, 20.0))
+        vel0, vel1, vel2 = endpoint_speed * d0, apex_speed * tangent_apex, endpoint_speed * d2
+        acc0, acc1, acc2 = np.zeros(3), apex_accel * inward, np.zeros(3)
+        return (
+            _quintic_coefficients(p0_arr, vel0, acc0, p1_arr, vel1, acc1),
+            _quintic_coefficients(p1_arr, vel1, acc1, p2_arr, vel2, acc2),
+        )
+
+    def objective(parameters: np.ndarray) -> float:
+        left, right = build_spline(parameters)
+        return _jerk_energy(left) + _jerk_energy(right)
+
+    x0 = np.log([chord_length * 0.5, chord_length * 0.5, max(4.0 * height, 1e-6)])
+    best_x = _bfgs_minimize(objective, x0)
+    left_coeff, right_coeff = build_spline(best_x)
+
+    def evaluate(t: float) -> tuple[hou.Vector3, hou.Vector3]:
+        t = float(np.clip(t, 0.0, 1.0))
+        target_along = t * chord_length
+
+        if target_along <= mid_along:
+            sub_t = _solve_t_for_along(left_coeff, p0_arr, tangent_apex, target_along)
+            pos, vel = _eval_quintic(left_coeff, sub_t)
+        else:
+            sub_t = _solve_t_for_along(right_coeff, p0_arr, tangent_apex, target_along)
+            pos, vel = _eval_quintic(right_coeff, sub_t)
+
+        tangent = _normalized(vel) if np.linalg.norm(vel) > 1e-12 else tangent_apex
+        in_plane_normal = np.cross(tangent, plane_normal)
+        in_plane_normal = _normalized(in_plane_normal) if np.linalg.norm(in_plane_normal) > 1e-12 else inward
+
+        return hou.Vector3(pos), hou.Vector3(in_plane_normal)
+
+    return evaluate
+
+def _to_np(v: hou.Vector3 | hou.Point | Sequence[float] | np.ndarray) -> np.ndarray:
+    return np.array(v.position() if isinstance(v, hou.Point) else v, dtype=float)
+
+def _normalized(v: np.ndarray) -> np.ndarray:
+    length = np.linalg.norm(v)
+    assert length > 1e-6, "Expected non-zero vector for normalization"
+    return v / length
+
+def _project_on_plane(v: np.ndarray, normal: np.ndarray) -> np.ndarray:
+    return _normalized(v - np.dot(v, normal) * normal)
+
+def _quintic_coefficients(
+        p0: np.ndarray,
+        v0: np.ndarray,
+        a0: np.ndarray,
+        p1: np.ndarray,
+        v1: np.ndarray,
+        a1: np.ndarray,
+) -> np.ndarray:
+    """Construct quintic polynomial C(t) = c0 + c1*t + ... + c5*t^5 for t in [0, 1]."""
+    dp = p1 - p0
+    c0 = p0
+    c1 = v0
+    c2 = 0.5 * a0
+    c3 = 10.0 * dp - 6.0 * v0 - 4.0 * v1 - 1.5 * a0 + 0.5 * a1
+    c4 = -15.0 * dp + 8.0 * v0 + 7.0 * v1 + 1.5 * a0 - a1
+    c5 = 6.0 * dp - 3.0 * (v0 + v1) - 0.5 * (a0 - a1)
+    return np.vstack([c0, c1, c2, c3, c4, c5])
+
+def _jerk_energy(coeff: np.ndarray) -> float:
+    """Compute exact integral of ||C'''(t)||^2 dt from 0 to 1 for a quintic polynomial."""
+    A = 6.0 * coeff[3]
+    B = 24.0 * coeff[4]
+    C = 60.0 * coeff[5]
+
+    return float(
+        np.dot(A, A)
+        + np.dot(A, B)
+        + (2.0 / 3.0) * np.dot(A, C)
+        + (1.0 / 3.0) * np.dot(B, B)
+        + 0.5 * np.dot(B, C)
+        + 0.2 * np.dot(C, C)
+    )
+
+def _eval_quintic(coeff: np.ndarray, t: float) -> tuple[np.ndarray, np.ndarray]:
+    """Evaluate position and velocity of quintic polynomial at scalar t."""
+    t2 = t * t
+    t3 = t2 * t
+    t4 = t3 * t
+    t5 = t4 * t
+
+    pos = coeff[0] + coeff[1] * t + coeff[2] * t2 + coeff[3] * t3 + coeff[4] * t4 + coeff[5] * t5
+    vel = coeff[1] + 2.0 * coeff[2] * t + 3.0 * coeff[3] * t2 + 4.0 * coeff[4] * t3 + 5.0 * coeff[5] * t4
+    return pos, vel
+
+def _solve_t_for_along(coeff: np.ndarray, p0: np.ndarray, along_axis: np.ndarray, target_along: float) -> float:
+    """Solve for parameter t in [0, 1] such that (C(t) - p0) . along_axis = target_along."""
+    k = np.dot(coeff, along_axis)
+    k[0] -= (np.dot(p0, along_axis) + target_along)
+
+    val0 = k[0]
+    val1 = float(np.sum(k))
+    if val0 * val1 >= 0.0:
+        return 0.0 if abs(val0) < abs(val1) else 1.0
+
+    low, high = 0.0, 1.0
+    t = max(0.0, min(1.0, -val0 / (val1 - val0)))
+    for _ in range(25):
+        t2 = t * t
+        t3 = t2 * t
+        t4 = t3 * t
+        t5 = t4 * t
+        val = k[0] + k[1] * t + k[2] * t2 + k[3] * t3 + k[4] * t4 + k[5] * t5
+        if abs(val) < 1e-12:
+            break
+        if val < 0.0:
+            low = t
+        else:
+            high = t
+        dval = k[1] + 2.0 * k[2] * t + 3.0 * k[3] * t2 + 4.0 * k[4] * t3 + 5.0 * k[5] * t4
+        if abs(dval) > 1e-12:
+            t_new = t - val / dval
+            if low < t_new < high:
+                t = t_new
+            else:
+                t = 0.5 * (low + high)
+        else:
+            t = 0.5 * (low + high)
+
+    return float(t)
+
+def _bfgs_minimize(
+        f: Callable[[np.ndarray], float],
+        x0: np.ndarray | list[float],
+        max_iter: int = 200,
+        gtol: float = 1e-5,
+        eps: float = 1e-6,
+) -> np.ndarray:
+    x = np.array(x0, dtype=float)
+    n = len(x)
+    H = np.eye(n)
+
+    def grad(x_curr: np.ndarray) -> np.ndarray:
+        g = np.zeros(n)
+        for i in range(n):
+            dx = np.zeros(n)
+            dx[i] = eps
+            g[i] = (f(x_curr + dx) - f(x_curr - dx)) / (2.0 * eps)
+        return g
+
+    fx = f(x)
+    g = grad(x)
+
+    for _ in range(max_iter):
+        if np.linalg.norm(g) < gtol:
+            break
+        p = -H @ g
+        alpha = 1.0
+        c1 = 1e-4
+        while alpha > 1e-8:
+            if f(x + alpha * p) <= fx + c1 * alpha * np.dot(g, p):
+                break
+            alpha *= 0.5
+
+        x_next = x + alpha * p
+        fx_next = f(x_next)
+        g_next = grad(x_next)
+
+        s = x_next - x
+        y = g_next - g
+        ys = np.dot(y, s)
+
+        if ys > 1e-10:
+            rho = 1.0 / ys
+            I = np.eye(n)
+            H = (I - rho * np.outer(s, y)) @ H @ (I - rho * np.outer(y, s)) + rho * np.outer(s, s)
+        else:
+            H = np.eye(n)
+
+        x, fx, g = x_next, fx_next, g_next
+        if np.linalg.norm(s) < 1e-8:
+            break
+
+    return x
