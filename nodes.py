@@ -4,7 +4,7 @@ from typing import Callable
 import hou
 
 import developing
-from common import add_attr, remove_attrs
+from common import add_attr, remove_attrs, title_case, add_heading
 
 
 def sopify(
@@ -77,38 +77,45 @@ def _add_reload_button(parent: hou.SopNode) -> hou.SopNode:
 def propagate_parameters(
     parent: hou.SopNode,
     child: hou.SopNode,
-    *,
-    prefix: str = "",
-    skip_params: tuple[str, ...] = (),
+    skip_params: str | tuple[str, ...] = (),
+    heading: str = "",
 ) -> None:
     """Expose spare parameters from child node onto parent node and link them via expressions."""
+    if not heading:
+        heading = title_case(child.name())
+    add_heading(parent, heading)
+
+    if isinstance(skip_params, str):
+        skip_params = (skip_params,)
     parameters = tuple(
         parameter for parameter in child.parmTuples()
         if parameter[0].isSpare() and parameter.name() not in skip_params
     )
-    templates = parent.parmTemplateGroup()
-    label_prefix = prefix.rstrip("_").replace("_", " ").title()
 
-    existing_names = {t.name() for t in templates.entries()}
+    group = parent.parmTemplateGroup()
+    prefix = child.name() + '_'
+    existing_names = {t.name() for t in group.entries()}
     for source in parameters:
         target_name = f"{prefix}{source.name()}"
         if target_name in existing_names:
             continue
-        template = source.parmTemplate().clone()
-        template.setName(target_name)
-        if label_prefix:
-            template.setLabel(f"{label_prefix} {template.label()}")
-        templates.append(template)
-
-    parent.setParmTemplateGroup(templates)
+        param = source.parmTemplate().clone()
+        param.setName(target_name)
+        group.append(param)
+    parent.setParmTemplateGroup(group)
 
     for source in parameters:
         target = parent.parmTuple(f"{prefix}{source.name()}")
         if target is None:
             continue
-        target.set(source.eval())
-        for source_parm, target_parm in zip(source, target):
-            source_parm.set(target_parm)
+        template = source.parmTemplate()
+        if isinstance(template, hou.LabelParmTemplate) and template.labelParmType() == hou.labelParmType.Heading:
+            text = source[0].evalAsString()
+            target[0].set(f"{heading} > {text}")
+        else:
+            target.set(source.eval())
+            for source_parm, target_parm in zip(source, target):
+                source_parm.set(target_parm)
 
 
 def add_merge(
