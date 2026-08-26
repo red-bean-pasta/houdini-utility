@@ -211,6 +211,20 @@ def fill_face(
         polygon.addVertex(point)
     return polygon
 
+def fill_face_reversed(
+    geo: hou.Geometry,
+    points: Sequence[hou.Point],
+) -> hou.Polygon:
+    """
+    Same as fill_face but reverse the order
+    :param geo:
+    :param points:
+    :return:
+    """
+    clone = list(points)
+    clone.reverse()
+    return fill_face(geo, clone)
+
 def get_prim_normal(prim: hou.Prim) -> hou.Vector3:
     if isinstance(prim, hou.Face):
         return prim.normal()
