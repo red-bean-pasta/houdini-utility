@@ -1,10 +1,77 @@
-import math
+import re
 from collections import defaultdict
 from typing import get_origin, TypeVar, get_args, Any, Sequence
 
 import hou
 
 T = TypeVar("T")
+
+
+def snake_case(s):
+    s = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', s)
+    s = re.sub(r'[\s\-]+', '_', s)
+    return s.lower()
+
+def title_case(s):
+    words = re.findall(r'[A-Za-z0-9]+', re.sub(r'([a-z0-9])([A-Z])', r'\1 \2', s))
+    return ' '.join(word.capitalize() for word in words)
+
+def pascal_case(s):
+    return title_case(s).replace(' ', '')
+
+
+def add_heading(
+        node: hou.OpNode,
+        text: str,
+        name: str = "",
+        label: str = "",
+        **kwargs
+) -> None:
+    group = node.parmTemplateGroup()
+    if not name:
+        name = snake_case(text)
+    heading = hou.LabelParmTemplate(
+        name=name,
+        label=label if label else text,
+        **kwargs
+    )
+    heading.setLabelParmType(hou.labelParmType.Heading)
+    group.append(heading)
+    node.setParmTemplateGroup(group)
+    node.parm(name).set(text)
+
+def add_float_param(
+        node: hou.OpNode,
+        name: str,
+        size: int = 1,
+        default: float | tuple[float, ...] = (0.0,),
+        min_max: tuple[float | None, float | None] = (None, None),
+        naming_scheme: hou.parmNamingScheme = hou.parmNamingScheme.XYZW,
+        label: str = "",
+        **kwargs
+) -> None:
+    group = node.parmTemplateGroup()
+
+    if isinstance(default, float):
+        default = (default,)
+    param = hou.FloatParmTemplate(
+        name,
+        label if label else title_case(name),
+        num_components=size,
+        default_value=default,
+        naming_scheme=naming_scheme,
+        **kwargs,
+    )
+    p_min, p_max = min_max
+    if p_min is not None:
+        param.setMinValue(p_min)
+        param.setMinIsStrict(True)
+    if p_max is not None:
+        param.setMaxValue(p_max)
+        param.setMaxIsStrict(True)
+
+    group.append(param)
+    node.setParmTemplateGroup(group)
 
 
 def affix_attribute_value(prefix: str, *affixes: int | str) -> str:
