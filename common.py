@@ -1,10 +1,44 @@
 import re
 from collections import defaultdict
-from typing import get_origin, TypeVar, get_args, Any, Sequence
+from typing import get_origin, TypeVar, get_args, Any, Sequence, Generic, Iterator
 
 import hou
 
 T = TypeVar("T")
+
+
+class MessagedResult(Generic[T]):
+    def __init__(self, value: T, messages: Sequence[str] = ()):
+        self.value = value
+        self.messages = list(messages)
+
+    @property
+    def has_messages(self) -> bool:
+        return bool(self.messages)
+
+    def add_message(self, message: str) -> None:
+        self.messages.append(message)
+
+    def add_messages(self, messages: Sequence[str]) -> None:
+        self.messages.extend(messages)
+
+    def __iter__(self) -> Iterator[Any]:
+        yield self.value
+        yield self.messages
+
+    def __getitem__(self, index: int) -> Any:
+        return (self.value, self.messages)[index]
+
+    def __len__(self) -> int:
+        return 2
+
+    @staticmethod
+    def retain(value: T, *results: "MessagedResult") -> "MessagedResult[T]":
+        messages: list[str] = []
+        for r in results:
+            if isinstance(r, MessagedResult):
+                messages.extend(r.messages)
+        return MessagedResult(value, messages)
 
 
 def snake_case(s):
@@ -320,3 +354,18 @@ def rotation_to(a: hou.Vector3, b: hou.Vector3) -> hou.Quaternion:
     q = hou.Quaternion()
     q.setToVectors(a, b)
     return q
+
+def rotate_positions(
+        origin: hou.Vector3,
+        positions: Sequence[hou.Vector3],
+        axis: hou.Vector3,
+        degrees: float,
+) -> tuple[hou.Vector3, ...]:
+    rot = hou.hmath.buildRotateAboutAxis(
+        axis,
+        degrees,
+    )
+    return tuple(
+        (p - origin) * rot + origin
+        for p in positions
+    )
