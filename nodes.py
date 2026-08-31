@@ -19,7 +19,7 @@ def sopify(
     qualname = function.__qualname__
     has_arg = len(inspect.signature(function).parameters) >= 1
 
-    node = parent.createNode("python", function.__name__.strip('_'))
+    node = parent.createNode("python", function.__name__.strip("_"))
     if input_node is not None:
         node.setInput(0, input_node)
 
@@ -37,10 +37,10 @@ def add_reloadable_subnet(
         name: str,
 ) -> hou.SopNode:
     subnet = parent.createNode("subnet", name)
-    _add_reload_button(subnet)
+    add_reload_button(subnet)
     return subnet
 
-def _add_reload_button(parent: hou.SopNode) -> hou.SopNode:
+def add_reload_button(parent: hou.SopNode) -> hou.SopNode:
     node = sopify(parent, None, developing.reload_modules)
 
     templates = node.parmTemplateGroup()
@@ -93,7 +93,7 @@ def propagate_parameters(
     )
 
     group = parent.parmTemplateGroup()
-    prefix = child.name() + '_'
+    prefix = child.name() + "_"
     existing_names = {t.name() for t in group.entries()}
     for source in parameters:
         target_name = f"{prefix}{source.name()}"
@@ -198,7 +198,7 @@ def add_outside_recalculation(
     clean_reverse = subnet.createNode("clean", "reverse_winding")
     clean_reverse.setInput(0, calc)
     clean_reverse.parm("orientpoly").set(0)
-    expression = '1 - detail(0, "tmp_reverse_winding", 0)' if reverse else 'detail(0, "tmp_reverse_winding", 0)'
+    expression = "1 - detail(0, \"tmp_reverse_winding\", 0)" if reverse else "detail(0, \"tmp_reverse_winding\", 0)"
     clean_reverse.parm("reversewinding").setExpression(expression)
     clean_reverse.parm("deldegengeo").set(0)
     clean_reverse.parm("delunusedpts").set(0)
@@ -218,13 +218,36 @@ def add_outside_recalculation(
 def _check_majority_insides(node: hou.SopNode) -> None:
     geo = node.geometry()
     prims = geo.prims()
-    is_closed = bool(prims) and all(p.intrinsicValue("closed") for p in prims)
+    is_closed = _is_closed_manifold(geo)
     is_inside = False
     if is_closed:
         vol = sum(p.intrinsicValue("measuredvolume") for p in prims)
         is_inside = vol < 0
+        node.addMessage(f"Geometry is closed (watertight manifold, measured volume: {vol:.2f}).")
+    else:
+        node.addMessage("Geometry is open (boundary or non-manifold edges detected).")
     add_attr(geo, hou.attribType.Global, "tmp_reverse_winding", 0)
     geo.setGlobalAttribValue("tmp_reverse_winding", 1 if is_inside else 0)
+
+
+def _is_closed_manifold(geo: hou.Geometry) -> bool:
+    prims = geo.prims()
+    if not prims:
+        return False
+    edge_counts: dict[tuple[int, int], int] = {}
+    for prim in prims:
+        if not isinstance(prim, hou.Face):
+            return False
+        verts = prim.vertices()
+        n = len(verts)
+        if n < 3:
+            return False
+        for i in range(n):
+            p1 = verts[i].point().number()
+            p2 = verts[(i + 1) % n].point().number()
+            edge = (p1, p2) if p1 < p2 else (p2, p1)
+            edge_counts[edge] = edge_counts.get(edge, 0) + 1
+    return all(count == 2 for count in edge_counts.values())
 
 
 def _cleanup_recalculate_outside(node: hou.SopNode) -> None:

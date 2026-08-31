@@ -54,6 +54,10 @@ def pascal_case(s):
     return title_case(s).replace(' ', '')
 
 
+def points_to_positions(points: Sequence[hou.Point]) -> Iterator[hou.Vector3]:
+    return (p.position() for p in points)
+
+
 def add_heading(
         node: hou.OpNode,
         text: str,
