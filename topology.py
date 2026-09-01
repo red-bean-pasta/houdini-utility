@@ -10,19 +10,20 @@ from common import fill_face
 def fill_pentagon(
     geo: hou.Geometry,
     points: Sequence[hou.Point],
-    midedge: tuple[hou.Point, hou.Point],
+    midpoint_edge: tuple[hou.Point, hou.Point],
+    reverse: bool = False,
 ) -> tuple[hou.Point, hou.Point]:
     """Subdivide a pentagon into 3 quads by placing a midpoint on one edge and an internal floating point.
 
     :param geo: The Houdini geometry.
     :param points: 5 cyclic points of the pentagon.
-    :param midedge: Tuple of 2 adjacent points defining the edge to split.
+    :param midpoint_edge: Tuple of 2 adjacent points defining the edge to split.
     :return: Tuple of (midpoint on specified midedge, interior float point).
     """
     assert len(set(points)) == 5, "Expected 5 distinct points for fill_pentagon"
 
-    p_a, p_b = midedge
-    assert p_a in points and p_b in points and p_a != p_b, f"mid_edge {midedge} must be in points"
+    p_a, p_b = midpoint_edge
+    assert p_a in points and p_b in points and p_a != p_b, f"mid_edge {midpoint_edge} must be in points"
     idx_a = points.index(p_a)
     idx_b = points.index(p_b)
     diff = (idx_b - idx_a) % 5
@@ -59,11 +60,78 @@ def fill_pentagon(
     floatpoint = geo.createPoint()
     floatpoint.setPosition(f_pos)
 
-    fill_face(geo, [p1, midpoint, floatpoint, p2])
-    fill_face(geo, [midpoint, p0, p4, floatpoint])
-    fill_face(geo, [floatpoint, p4, p3, p2])
+    fill_face(geo, [p1, midpoint, floatpoint, p2], reverse)
+    fill_face(geo, [midpoint, p0, p4, floatpoint], reverse)
+    fill_face(geo, [floatpoint, p4, p3, p2], reverse)
 
     return midpoint, floatpoint
+
+
+def fill_pentagon_with_buffer(
+    geo: hou.Geometry,
+    points: Sequence[hou.Point],
+    buffer_edge: tuple[hou.Point, hou.Point],
+    buffer_ratio: float,
+    midpoint_edge: tuple[hou.Point, hou.Point],
+    reverse: bool = False,
+) -> tuple[hou.Point, hou.Point, hou.Point, hou.Point]:
+    """Subdivide a pentagon with a buffer quad adjacent to buffer_edge, then subdivide the remainder into 3 quads.
+
+    :param geo: The Houdini geometry.
+    :param points: 5 cyclic points of the pentagon.
+    :param buffer_edge: Tuple of 2 adjacent points defining the edge to buffer.
+    :param buffer_ratio: Ratio along the connected edges from buffer_edge (in [0, 1)).
+    :param midpoint_edge: Tuple of 2 adjacent points defining the edge to split in the pentagon.
+    :param reverse: Whether to reverse primitive vertex ordering.
+    :return: Tuple of (midpoint, interior float point, buffer_point_a, buffer_point_b).
+    """
+    assert len(set(points)) == 5, "Expected 5 distinct points for fill_pentagon_with_buffer"
+    assert 0.0 <= buffer_ratio < 1.0, f"buffer_ratio must be in [0.0, 1.0), got {buffer_ratio}"
+    assert set(midpoint_edge) != set(buffer_edge), f"midpoint_edge {midpoint_edge} cannot be buffer_edge {buffer_edge}"
+
+    pb_a, pb_b = buffer_edge
+    assert pb_a in points and pb_b in points and pb_a != pb_b, f"buffer_edge {buffer_edge} must be in points"
+    idx_a = points.index(pb_a)
+    idx_b = points.index(pb_b)
+    diff = (idx_b - idx_a) % 5
+    assert diff in (1, 4), f"buffer_edge points must be adjacent in points sequence, got diff {diff}"
+
+    if buffer_ratio == 0.0:
+        midpoint, floatpoint = fill_pentagon(geo, points, midpoint_edge, reverse)
+        return midpoint, floatpoint, pb_a, pb_b
+
+    if diff == 1:
+        p_start, p_end = pb_a, pb_b
+        p_prev = points[(idx_a - 1) % 5]
+        p_next = points[(idx_b + 1) % 5]
+    else:
+        p_start, p_end = pb_b, pb_a
+        p_prev = points[(idx_b - 1) % 5]
+        p_next = points[(idx_a + 1) % 5]
+
+    b_start_pos = p_start.position() * (1.0 - buffer_ratio) + p_prev.position() * buffer_ratio
+    b_start = geo.createPoint()
+    b_start.setPosition(b_start_pos)
+
+    b_end_pos = p_end.position() * (1.0 - buffer_ratio) + p_next.position() * buffer_ratio
+    b_end = geo.createPoint()
+    b_end.setPosition(b_end_pos)
+
+    fill_face(geo, [p_start, p_end, b_end, b_start], reverse)
+
+    new_points = [
+        b_start if p == p_start else (b_end if p == p_end else p)
+        for p in points
+    ]
+    new_midpoint_edge = (
+        b_start if midpoint_edge[0] == p_start else (b_end if midpoint_edge[0] == p_end else midpoint_edge[0]),
+        b_start if midpoint_edge[1] == p_start else (b_end if midpoint_edge[1] == p_end else midpoint_edge[1]),
+    )
+
+    midpoint, floatpoint = fill_pentagon(geo, new_points, new_midpoint_edge, reverse)
+    b_a = b_start if pb_a == p_start else b_end
+    b_b = b_end if pb_b == p_end else b_start
+    return midpoint, floatpoint, b_a, b_b
 
 
 def classify_after_inset(

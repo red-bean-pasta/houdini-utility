@@ -58,6 +58,7 @@ def deduplicate_point_attributes(
         attribute: str,
         prefix: str | tuple[str, ...] | None,
         add_affix: bool = False,
+        keep_first: bool = True,
 ) -> None:
     """Deduplicate string attributes on points by either clearing duplicates or affixing sequential indices.
 
@@ -65,6 +66,7 @@ def deduplicate_point_attributes(
     :param attribute: The point attribute name.
     :param prefix: Optional prefix to filter points.
     :param add_affix: If true, affixes like "_1", "_2" will be added; otherwise duplicates after the first are cleared.
+    :param keep_first: If true, first encountered point will keep the attribute, else the last;
     """
     points = points_start_with(geo, attribute, prefix) if prefix else geo.points()
     grouped: defaultdict[str, list[hou.Point]] = defaultdict(list)
@@ -78,7 +80,7 @@ def deduplicate_point_attributes(
             for i, point in enumerate(duplicates):
                 set_point_attr(point, attribute, f"{value}_{i+1}")
         else:
-            for point in duplicates[1:]:
+            for point in (duplicates[1:] if keep_first else duplicates[:-1]):
                 point.setAttribValue(attribute, "")
 
 

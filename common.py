@@ -41,6 +41,10 @@ class MessagedResult(Generic[T]):
         return MessagedResult(value, messages)
 
 
+def is_equal_approx(a: float, b: float, tol: float = 1e-5) -> True:
+    return abs(a - b) <= tol
+
+
 def snake_case(s):
     s = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', s)
     s = re.sub(r'[\s\-]+', '_', s)
@@ -90,8 +94,10 @@ def add_float_param(
 ) -> None:
     group = node.parmTemplateGroup()
 
-    if isinstance(default, float):
-        default = (default,)
+    if isinstance(default, (int, float)):
+        default = (float(default),)
+    else:
+        default = tuple(float(x) for x in default)
     param = hou.FloatParmTemplate(
         name,
         label if label else title_case(name),
@@ -310,25 +316,16 @@ def remove_groups(
 def fill_face(
     geo: hou.Geometry,
     points: Sequence[hou.Point],
+    reverse: bool = False,
 ) -> hou.Polygon:
+    clone = list(points)
+    if reverse:
+        clone.reverse()
     polygon = geo.createPolygon()
-    for point in points:
+    for point in clone:
         polygon.addVertex(point)
     return polygon
 
-def fill_face_reversed(
-    geo: hou.Geometry,
-    points: Sequence[hou.Point],
-) -> hou.Polygon:
-    """
-    Same as fill_face but reverse the order
-    :param geo:
-    :param points:
-    :return:
-    """
-    clone = list(points)
-    clone.reverse()
-    return fill_face(geo, clone)
 
 def get_prim_normal(prim: hou.Prim) -> hou.Vector3:
     if isinstance(prim, hou.Face):
