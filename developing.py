@@ -51,6 +51,7 @@ def save(
 
 
 def reload_modules() -> None:
+    importlib.invalidate_caches()
     hip_dir = Path(hou.hipFile.path()).resolve().parent  # type: ignore
 
     modules = []
@@ -58,21 +59,38 @@ def reload_modules() -> None:
     for name, module in list(sys.modules.items()):
         if module is None or id(module) in seen:
             continue
-        module_file = getattr(module, "__file__", None)
-        if not module_file:
-            continue
 
-        path = Path(module_file)
-        # Critical:
-        # Embedded/virtual modules such as PySide/Shiboken use relative
-        # __file__ values. Never resolve those against our working directory.
-        if not path.is_absolute():
-            continue
-        try:
-            path = path.resolve(strict=True)
-        except (OSError, RuntimeError):
-            continue
-        if not path.is_relative_to(hip_dir):
+        is_hip_module = False
+        module_file = getattr(module, "__file__", None)
+        if module_file:
+            path = Path(module_file)
+            # Critical:
+            # Embedded/virtual modules such as PySide/Shiboken use relative
+            # __file__ values. Never resolve those against our working directory.
+            if path.is_absolute():
+                try:
+                    resolved = path.resolve(strict=True)
+                    if resolved.is_relative_to(hip_dir):
+                        is_hip_module = True
+                except (OSError, RuntimeError):
+                    pass
+
+        if not is_hip_module:
+            # Handle packages (such as namespace packages) whose __file__ is None
+            module_path = getattr(module, "__path__", None)
+            if module_path:
+                for p in module_path:
+                    path = Path(p)
+                    if path.is_absolute():
+                        try:
+                            resolved = path.resolve(strict=True)
+                            if resolved.is_relative_to(hip_dir):
+                                is_hip_module = True
+                                break
+                        except (OSError, RuntimeError):
+                            pass
+
+        if not is_hip_module:
             continue
 
         spec = getattr(module, "__spec__", None)

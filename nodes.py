@@ -49,7 +49,6 @@ def add_reload_button(parent: hou.SopNode) -> hou.SopNode:
         "Reload",
         script_callback=inspect.cleandoc(r"""
             import hou
-            import utilities
             import developing
             
             node = hou.pwd()
