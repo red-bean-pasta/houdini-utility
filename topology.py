@@ -4,9 +4,9 @@ from typing import Sequence, Callable, Any
 
 import hou
 
-from common import fill_face, get_prim_normal
-from internal import elliptical_interpolator
-from internal.toplogy_helper import (
+from .common import fill_face, get_prim_normal
+from .internal import elliptical_interpolator
+from .internal.toplogy_helper import (
     Edge,
     partition_connected_prims,
     get_edge_prim_count,

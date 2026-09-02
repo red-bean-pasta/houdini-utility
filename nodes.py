@@ -3,8 +3,8 @@ from typing import Callable
 
 import hou
 
-import developing
-from common import add_attr, remove_attrs, title_case, add_heading
+from . import developing
+from .common import add_attr, remove_attrs, title_case, add_heading
 
 
 def sopify(
@@ -49,7 +49,7 @@ def add_reload_button(parent: hou.SopNode) -> hou.SopNode:
         "Reload",
         script_callback=inspect.cleandoc(r"""
             import hou
-            import developing
+            from utilities import developing
             
             node = hou.pwd()
             

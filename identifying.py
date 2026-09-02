@@ -7,8 +7,8 @@ from typing import Sequence, Callable, Literal
 
 import hou
 
-from topology import classify_after_inset
-from common import (
+from .topology import classify_after_inset
+from .common import (
     points_start_with,
     set_point_attr,
     fill_face,

@@ -2,7 +2,7 @@ from typing import Sequence, Any
 
 import hou
 
-from common import fill_face
+from ..common import fill_face
 
 
 class Edge:

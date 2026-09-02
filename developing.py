@@ -70,7 +70,7 @@ def reload_modules() -> None:
             if path.is_absolute():
                 try:
                     resolved = path.resolve(strict=True)
-                    if resolved.is_relative_to(hip_dir):
+                    if path.is_relative_to(hip_dir) or resolved.is_relative_to(hip_dir):
                         is_hip_module = True
                 except (OSError, RuntimeError):
                     pass
@@ -84,7 +84,7 @@ def reload_modules() -> None:
                     if path.is_absolute():
                         try:
                             resolved = path.resolve(strict=True)
-                            if resolved.is_relative_to(hip_dir):
+                            if path.is_relative_to(hip_dir) or resolved.is_relative_to(hip_dir):
                                 is_hip_module = True
                                 break
                         except (OSError, RuntimeError):
