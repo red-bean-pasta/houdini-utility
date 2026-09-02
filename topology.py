@@ -1,10 +1,162 @@
 import math
-from typing import Sequence, Callable
+from typing import Sequence, Callable, Any
 
 import hou
 import numpy as np
 
 from common import fill_face
+
+
+
+def loop_cut(
+        prim: hou.Prim,
+        start_point: hou.Point,
+        end_point: hou.Point,
+        scalar: float,
+        use_ratio: bool = True,
+) -> tuple[list[hou.Point], list[hou.Prim]]:
+    """Perform a loop cut across adjacent quads starting from a specified edge of a quad primitive.
+
+    - Places points interpolated between the start side and end side of each quad's cut edge.
+    - Propagates across quad topology until reaching an open boundary, non-quad geometry, or looping back.
+    - Deletes affected primitives and refills faces (end-side faces first, followed by start-side faces).
+    - Preserves all primitive attributes and primitive group memberships across divided primitives.
+
+    :param geo: The Houdini geometry.
+    :param prim: The initial quad primitive.
+    :param start_point: Starting point of the initial edge to cut.
+    :param end_point: Ending point of the initial edge to cut.
+    :param scalar: Ratio (in [0, 1]) or distance from start_point along the edge.
+    :param use_ratio: If True, scalar is interpreted as a ratio; otherwise as a distance.
+    :return: Tuple of (added_points, start_side_prims).
+    """
+    assert isinstance(prim, (hou.Prim, hou.Face, hou.Polygon)), f"Expected a primitive, got {type(prim)}"
+    assert len(prim.vertices()) == 4, f"Expected quad prim with 4 vertices, got {len(prim.vertices())}"
+
+    geo = prim.geometry()
+
+    pts = list(prim.points())
+    assert start_point in pts and end_point in pts, "start_point and end_point must be on prim"
+    assert start_point != end_point, "start_point and end_point must be distinct"
+    idx_s = pts.index(start_point)
+    idx_e = pts.index(end_point)
+    diff = (idx_e - idx_s) % 4
+    assert diff in (1, 3), f"start_point and end_point must form an edge on prim, got indices {idx_s} and {idx_e}"
+
+    visited_prims: list[hou.Prim] = []
+    added_points: list[hou.Point] = []
+    end_side_face_points: list[list[hou.Point]] = []
+    start_side_face_points: list[list[hou.Point]] = []
+
+    curr_prim: hou.Prim | None = prim
+    s_pt: hou.Point = start_point
+    e_pt: hou.Point = end_point
+
+    m_start = geo.createPoint()
+    m_start.setPosition(_calc_loop_cut_position(s_pt, e_pt, scalar, use_ratio))
+    added_points.append(m_start)
+    m_curr = m_start
+
+    while curr_prim is not None:
+        visited_prims.append(curr_prim)
+        pts = list(curr_prim.points())
+        idx_s = pts.index(s_pt)
+        idx_e = pts.index(e_pt)
+        diff = (idx_e - idx_s) % 4
+
+        if diff == 1:
+            e_next = pts[(idx_s + 2) % 4]
+            s_next = pts[(idx_s + 3) % 4]
+        else:
+            s_next = pts[(idx_e + 2) % 4]
+            e_next = pts[(idx_e + 3) % 4]
+
+        # Check if the opposite edge closes back to the start edge or start primitive
+        if {s_next, e_next} == {start_point, end_point}:
+            m_next = m_start
+            next_prim = None
+        else:
+            edge = geo.findEdge(s_next, e_next)
+            adj_prims = [p for p in edge.prims() if p != curr_prim] if edge is not None else []
+            if prim in adj_prims:
+                m_next = m_start
+                next_prim = None
+            else:
+                candidate_prims = [p for p in adj_prims if p not in visited_prims and len(p.vertices()) == 4]
+                m_next = geo.createPoint()
+                m_next.setPosition(_calc_loop_cut_position(s_next, e_next, scalar, use_ratio))
+                added_points.append(m_next)
+                if len(candidate_prims) == 1:
+                    next_prim = candidate_prims[0]
+                else:
+                    next_prim = None
+
+        if diff == 1:
+            end_side_face_points.append([m_curr, e_pt, e_next, m_next])
+            start_side_face_points.append([s_pt, m_curr, m_next, s_next])
+        else:
+            end_side_face_points.append([e_pt, m_curr, m_next, e_next])
+            start_side_face_points.append([m_curr, s_pt, s_next, m_next])
+
+        if next_prim is not None:
+            curr_prim = next_prim
+            s_pt = s_next
+            e_pt = e_next
+            m_curr = m_next
+        else:
+            curr_prim = None
+
+    attrib_data = _collect_prim_attribs(geo, visited_prims)
+
+    geo.deletePrims(visited_prims, keep_points=True)
+
+    end_side_prims: list[hou.Prim] = []
+    for face_pts in end_side_face_points:
+        end_side_prims.append(fill_face(geo, face_pts))
+    _apply_prim_attribs(attrib_data, end_side_prims)
+
+    start_side_prims: list[hou.Prim] = []
+    for face_pts in start_side_face_points:
+        start_side_prims.append(fill_face(geo, face_pts))
+    _apply_prim_attribs(attrib_data, start_side_prims)
+
+    return added_points, start_side_prims
+
+def _calc_loop_cut_position(p_start: hou.Point, p_end: hou.Point, scalar: float, use_ratio: bool) -> hou.Vector3:
+    pos_s = p_start.position()
+    pos_e = p_end.position()
+    if use_ratio:
+        return pos_s * (1.0 - scalar) + pos_e * scalar
+    else:
+        v = pos_e - pos_s
+        length = v.length()
+        if length < 1e-8:
+            return pos_s
+        return pos_s + (v / length) * scalar
+
+def _collect_prim_attribs(
+        geo: hou.Geometry,
+        prims: Sequence[hou.Prim],
+) -> list[tuple[dict[hou.Attrib, Any], list[hou.PrimGroup]]]:
+    prim_attribs = geo.primAttribs()
+    prim_groups = geo.primGroups()
+    return [
+        (
+            {attr: p.attribValue(attr) for attr in prim_attribs},
+            [g for g in prim_groups if g.contains(p)],
+        )
+        for p in prims
+    ]
+
+def _apply_prim_attribs(
+        attrib_data: Sequence[tuple[dict[hou.Attrib, Any], list[hou.PrimGroup]]],
+        prims: Sequence[hou.Prim],
+) -> None:
+    for (attr_dict, grp_list), p in zip(attrib_data, prims):
+        for attr, val in attr_dict.items():
+            p.setAttribValue(attr, val)
+        for g in grp_list:
+            g.add(p)
 
 
 def fill_pentagon(

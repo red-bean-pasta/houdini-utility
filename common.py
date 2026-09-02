@@ -58,15 +58,103 @@ def pascal_case(s):
     return title_case(s).replace(' ', '')
 
 
+class Parameters(dict[str, Any]):
+    """A dictionary subclass supporting attribute-style parameter access (e.g., `param.width`)."""
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(f"Parameter '{name}' not found") from None
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        self[name] = value
+
+    def __delattr__(self, name: str) -> None:
+        try:
+            del self[name]
+        except KeyError:
+            raise AttributeError(f"Parameter '{name}' not found") from None
+
+
+def get_params(
+        node: hou.OpNode,
+        exclude_internal: bool = True,
+        use_tuple: bool = True,
+) -> Parameters:
+    """Read all evaluated parameters on a node into a dot-accessible Parameters dictionary."""
+    params = Parameters()
+    for pt in node.parmTuples():
+        if exclude_internal and not pt.isSpare():
+            continue
+
+        tpl = pt.parmTemplate()
+        if isinstance(tpl, (hou.ButtonParmTemplate, hou.LabelParmTemplate, hou.SeparatorParmTemplate)):
+            continue
+
+        parent = pt[0].parentMultiParm() if hasattr(pt[0], "parentMultiParm") else None
+        if parent is not None and isinstance(parent.parmTemplate(), hou.RampParmTemplate):
+            continue
+
+        if isinstance(tpl, hou.ToggleParmTemplate):
+            val = bool(pt[0].evalAsInt())
+        elif isinstance(tpl, hou.RampParmTemplate):
+            val = pt[0].evalAsRamp()
+        elif len(pt) == 1:
+            val = pt[0].eval()
+        else:
+            evaluated = pt.eval()
+            if not use_tuple and isinstance(tpl, hou.FloatParmTemplate):
+                is_vector = (
+                    tpl.namingScheme() in (hou.parmNamingScheme.XYZW, hou.parmNamingScheme.UVW, hou.parmNamingScheme.XYWH)
+                    or tpl.look() == hou.parmLook.Vector
+                )
+                if is_vector:
+                    match len(pt):
+                        case 2:
+                            val = hou.Vector2(evaluated)
+                        case 3:
+                            val = hou.Vector3(evaluated)
+                        case 4:
+                            val = hou.Vector4(evaluated)
+                        case _:
+                            val = evaluated
+                else:
+                    val = evaluated
+            else:
+                val = evaluated
+
+        params[pt.name()] = val
+
+    return params
+
+
 def points_to_positions(points: Sequence[hou.Point]) -> Iterator[hou.Vector3]:
     return (p.position() for p in points)
 
+
+def add_folder(
+        node: hou.OpNode,
+        name: str,
+        label: str = "",
+        folder_type: hou.folderType = hou.folderType.Tabs,
+        **kwargs,
+) -> None:
+    if not label:
+        label = title_case(name)
+    ptg = node.parmTemplateGroup()
+    folder = ptg.findFolder(label)
+    if not folder:
+        folder = hou.FolderParmTemplate(name, label, folder_type=folder_type, **kwargs)
+        ptg.append(folder)
+    node.setParmTemplateGroup(ptg)
 
 def add_heading(
         node: hou.OpNode,
         text: str,
         name: str = "",
         label: str = "",
+        folder_label: str = "",
         **kwargs
 ) -> None:
     group = node.parmTemplateGroup()
@@ -78,7 +166,8 @@ def add_heading(
         **kwargs
     )
     heading.setLabelParmType(hou.labelParmType.Heading)
-    group.append(heading)
+
+    _add_to_group(group, heading, folder_label)
     node.setParmTemplateGroup(group)
     node.parm(name).set(text)
 
@@ -90,6 +179,7 @@ def add_float_param(
         min_max: tuple[float | None, float | None] = (None, None),
         naming_scheme: hou.parmNamingScheme = hou.parmNamingScheme.XYZW,
         label: str = "",
+        folder_label: str = "",
         **kwargs
 ) -> None:
     group = node.parmTemplateGroup()
@@ -114,8 +204,18 @@ def add_float_param(
         param.setMaxValue(p_max)
         param.setMaxIsStrict(True)
 
-    group.append(param)
+    _add_to_group(group, param, folder_label)
     node.setParmTemplateGroup(group)
+
+def _add_to_group(
+        group: hou.ParmTemplateGroup,
+        param: hou.ParmTemplate,
+        folder: str
+) -> None:
+    if not folder:
+        group.append(param)
+    else:
+        group.appendToFolder(folder, param)
 
 
 def affix_attribute_value(prefix: str, *affixes: int | str) -> str:
