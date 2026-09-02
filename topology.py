@@ -1,11 +1,131 @@
 import math
+from collections import defaultdict
 from typing import Sequence, Callable, Any
 
 import hou
-import numpy as np
 
-from common import fill_face
+from common import fill_face, get_prim_normal
+from internal import elliptical_interpolator
+from internal.toplogy_helper import (
+    Edge,
+    partition_connected_prims,
+    get_edge_prim_count,
+    collect_prim_attrs,
+    copy_point_data,
+    fill_faces,
+)
 
+
+def inset(
+        prims: list[hou.Prim],
+        scalar: float,
+        use_ratio: bool = True,
+) -> list[hou.Prim]:
+    """Perform an inset operation on a collection of polygon primitives.
+
+    - Groups primitives into connected components and insets each component independently.
+    - Offsets boundary vertices inward by distance or ratio and generates border quad faces (trapezoids).
+    - Preserves primitive attributes and primitive group memberships across divided primitives.
+    - Preserves point attributes and group memberships on newly generated inset points.
+
+    :param prims: List of polygon primitives to inset.
+    :param scalar: Offset ratio (in [0, 1]) or world distance.
+    :param use_ratio: If True, scalar is interpreted as a ratio; otherwise as absolute distance.
+    :return: List of inner inset primitives.
+    """
+    if not prims:
+        return []
+
+    geo = prims[0].geometry()
+    components = partition_connected_prims(prims)
+
+    inner_prims: list[hou.Prim] = []
+    for comp in components:
+        inner_prims.extend(_inset_connected(geo, comp, scalar, use_ratio))
+
+    return inner_prims
+
+def _inset_connected(
+        geo: hou.Geometry,
+        island: list[hou.Prim],
+        scalar: float,
+        is_scalar_ratio: bool,
+) -> list[hou.Prim]:
+    edge_counts = get_edge_prim_count(island)
+
+    incoming_boundary_edge: dict[hou.Point, tuple[hou.Point, hou.Prim, float]] = {}
+    outgoing_boundary_edge: dict[hou.Point, tuple[hou.Point, hou.Prim, float]] = {}
+    boundary_edges_by_prim: defaultdict[hou.Prim, list[tuple[hou.Point, hou.Point]]] = defaultdict(list)
+    for p in island:
+        pts = [v.point() for v in p.vertices()]
+        n = len(pts)
+        for i in range(n):
+            u, v = pts[i], pts[(i + 1) % n]
+            edge = Edge.from_points(u, v, reorder=True)
+            if edge_counts[edge] == 1:
+                boundary_edges_by_prim[p].append((u, v))
+                edge_len = (v.position() - u.position()).length()
+                outgoing_boundary_edge[u] = (v, p, edge_len)
+                incoming_boundary_edge[v] = (u, p, edge_len)
+
+    inset_point_map: dict[hou.Point, hou.Point] = {}
+    for pt in incoming_boundary_edge:
+        u, p_in, l_in = incoming_boundary_edge[pt]
+        w, p_out, l_out = outgoing_boundary_edge[pt]
+
+        pos = pt.position()
+        t_in = (pos - u.position()).normalized()
+        t_out = (w.position() - pos).normalized()
+
+        norm_in = get_prim_normal(p_in)
+        norm_out = get_prim_normal(p_out)
+
+        n1 = t_in.cross(norm_in).normalized()
+        n2 = t_out.cross(norm_out).normalized()
+
+        if is_scalar_ratio:
+            d1 = l_in * scalar
+            d2 = l_out * scalar
+        else:
+            d1 = scalar
+            d2 = scalar
+
+        cos_theta = n1.dot(n2)
+        denom = 1.0 - cos_theta * cos_theta
+        if denom > 1e-6:
+            alpha = (d1 - d2 * cos_theta) / denom
+            beta = (d2 - d1 * cos_theta) / denom
+            delta_v = n1 * alpha + n2 * beta
+        else:
+            delta_v = (n1 + n2).normalized() * ((d1 + d2) * 0.5)
+
+        new_pt = geo.createPoint()
+        new_pt.setPosition(pos + delta_v)
+        copy_point_data(pt, new_pt)
+        inset_point_map[pt] = new_pt
+
+    attr_data = collect_prim_attrs(island)
+
+    prim_attr_map = dict(zip(island, attr_data))
+    inner_face_points: list[list[hou.Point]] = []
+    inner_attribs: list[tuple[dict[str, Any], list[str]]] = []
+    border_face_points: list[list[hou.Point]] = []
+    border_attribs: list[tuple[dict[str, Any], list[str]]] = []
+    for p in island:
+        pts = [v.point() for v in p.vertices()]
+        inner_pts = [inset_point_map.get(pt, pt) for pt in pts]
+        inner_face_points.append(inner_pts)
+        inner_attribs.append(prim_attr_map[p])
+        for u, v in boundary_edges_by_prim[p]:
+            u_prime = inset_point_map[u]
+            v_prime = inset_point_map[v]
+            border_face_points.append([u, v, v_prime, u_prime])
+            border_attribs.append(prim_attr_map[p])
+
+    geo.deletePrims(island, keep_points=True)
+    inner_prims = fill_faces(inner_face_points, inner_attribs)
+    _ = fill_faces(border_face_points, border_attribs)
+    return inner_prims
 
 
 def loop_cut(
@@ -22,7 +142,6 @@ def loop_cut(
     - Deletes affected primitives and refills faces (end-side faces first, followed by start-side faces).
     - Preserves all primitive attributes and primitive group memberships across divided primitives.
 
-    :param geo: The Houdini geometry.
     :param prim: The initial quad primitive.
     :param start_point: Starting point of the initial edge to cut.
     :param end_point: Ending point of the initial edge to cut.
@@ -106,20 +225,10 @@ def loop_cut(
         else:
             curr_prim = None
 
-    attrib_data = _collect_prim_attribs(geo, visited_prims)
-
+    attr_data = collect_prim_attrs(visited_prims)
     geo.deletePrims(visited_prims, keep_points=True)
-
-    end_side_prims: list[hou.Prim] = []
-    for face_pts in end_side_face_points:
-        end_side_prims.append(fill_face(geo, face_pts))
-    _apply_prim_attribs(attrib_data, end_side_prims)
-
-    start_side_prims: list[hou.Prim] = []
-    for face_pts in start_side_face_points:
-        start_side_prims.append(fill_face(geo, face_pts))
-    _apply_prim_attribs(attrib_data, start_side_prims)
-
+    _ = fill_faces(end_side_face_points, attr_data)
+    start_side_prims = fill_faces(start_side_face_points, attr_data)
     return added_points, start_side_prims
 
 def _calc_loop_cut_position(p_start: hou.Point, p_end: hou.Point, scalar: float, use_ratio: bool) -> hou.Vector3:
@@ -133,30 +242,6 @@ def _calc_loop_cut_position(p_start: hou.Point, p_end: hou.Point, scalar: float,
         if length < 1e-8:
             return pos_s
         return pos_s + (v / length) * scalar
-
-def _collect_prim_attribs(
-        geo: hou.Geometry,
-        prims: Sequence[hou.Prim],
-) -> list[tuple[dict[hou.Attrib, Any], list[hou.PrimGroup]]]:
-    prim_attribs = geo.primAttribs()
-    prim_groups = geo.primGroups()
-    return [
-        (
-            {attr: p.attribValue(attr) for attr in prim_attribs},
-            [g for g in prim_groups if g.contains(p)],
-        )
-        for p in prims
-    ]
-
-def _apply_prim_attribs(
-        attrib_data: Sequence[tuple[dict[hou.Attrib, Any], list[hou.PrimGroup]]],
-        prims: Sequence[hou.Prim],
-) -> None:
-    for (attr_dict, grp_list), p in zip(attrib_data, prims):
-        for attr, val in attr_dict.items():
-            p.setAttribValue(attr, val)
-        for g in grp_list:
-            g.add(p)
 
 
 def fill_pentagon(
@@ -282,7 +367,7 @@ def fill_pentagon_with_buffer(
 
     midpoint, floatpoint = fill_pentagon(geo, new_points, new_midpoint_edge, reverse)
     b_a = b_start if pb_a == p_start else b_end
-    b_b = b_end if pb_b == p_end else b_start
+    b_b = b_end if pb_a == p_start else b_start
     return midpoint, floatpoint, b_a, b_b
 
 
@@ -338,16 +423,10 @@ def get_point_on_ellipse_2d(
         side_end: hou.Vector3,
         rad_from_y: float = math.pi / 4,
 ) -> hou.Vector3:
-    """Evaluate a point on a planar ellipse arc parameterized by its semi-axes vectors."""
-    v_upper = vertical_end - origin
-    v_left = side_end - origin
-
-    assert v_upper.length() > 1e-6, "vertical_end must not coincide with origin"
-    assert v_left.length() > 1e-6, "side_end must not coincide with origin"
-    assert math.isclose(v_upper.dot(v_left), 0.0, abs_tol=1e-5), f"upper-origin ({v_upper}) and side-origin ({v_left}) axes must be perpendicular"
-
-    return origin + v_upper * math.cos(rad_from_y) + v_left * math.sin(rad_from_y)
-
+    """
+    See `internal.elliptical_interpolator.interpolate_conic`.
+    """
+    return elliptical_interpolator.get_point_on_ellipse_2d(origin, vertical_end, side_end, rad_from_y)
 
 def interpolate_conic(
         p0: hou.Vector3 | hou.Point,
@@ -356,119 +435,10 @@ def interpolate_conic(
         normal0: hou.Vector3,
         normal1: hou.Vector3,
 ) -> Callable[[float], tuple[tuple[hou.Vector3, hou.Vector3], ...]]:
-    """Construct a planar conic passing through p0, p1, p2 with normals normal0 at p0 and normal1 at p1.
-
-    The method projects the 3D problem into a 2D local orthonormal coordinate plane:
-      - along_axis: direction from p0 to p1
-      - across_axis: in-plane normal orthogonal to along_axis
-    It sets up an algebraic conic equation:
-      A * x² + B * x * y + C * y² + D * x + E * y = 0
-    where (x, y) = (along, across) with p0 at (0, 0).
-    The remaining 4 constraints (passage through p1, p2, and normal directions at p0, p1)
-    form a 4x5 linear system solved via SVD for the 1D null space.
-
-    :param p0: First point on conic (origin of the local 2D coordinate system).
-    :param p1: Second point on conic.
-    :param p2: Intermediate third point on conic.
-    :param normal0: Inward normal vector at p0.
-    :param normal1: Inward normal vector at p1.
-    :return: A function that accepts a signed distance along the p0->p1 axis,
-             and returns 0, 1, or 2 point and normal pairs in 3D space on the conic.
     """
-    vector0 = p0.position() if isinstance(p0, hou.Point) else hou.Vector3(p0)
-    vector1 = p1.position() if isinstance(p1, hou.Point) else hou.Vector3(p1)
-    vector2 = p2.position() if isinstance(p2, hou.Point) else hou.Vector3(p2)
-
-    delta01 = vector1 - vector0
-    delta02 = vector2 - vector0
-    assert delta01.length() != 0.0, "p0 and p1 must be distinct"
-
-    along_axis = delta01.normalized()
-    normal = along_axis.cross(delta02)
-    assert normal.length() != 0.0, "p0, p1, and p2 must not be collinear"
-    normal = normal.normalized()
-    across_axis = normal.cross(along_axis).normalized()
-
-    along1 = delta01.length()
-    along2 = delta02.dot(along_axis)
-    across2 = delta02.dot(across_axis)
-
-    def project_normal(norm: hou.Vector3) -> tuple[float, float]:
-        proj = norm - norm.dot(normal) * normal
-        assert proj.length() != 0.0, "Normal must have a non-zero component in the conic plane"
-        proj = proj.normalized()
-        return proj.dot(along_axis), proj.dot(across_axis)
-
-    along_normal0, across_normal0 = project_normal(normal0)
-    along_normal1, across_normal1 = project_normal(normal1)
-
-    # A*x² + B*x*y + C*y² + D*x + E*y = 0
-    matrix = np.array([
-        [along1**2, 0.0, 0.0, along1, 0.0],
-        [along2**2, along2 * across2, across2**2, along2, across2],
-        [0.0, 0.0, 0.0, across_normal0, -along_normal0],
-        [2.0 * along1 * across_normal1, -along1 * along_normal1, 0.0, across_normal1, -along_normal1],
-    ], dtype=float)
-    _, singular_values, vh = np.linalg.svd(matrix)
-    A, B, C, D, E = map(float, vh[-1])
-
-    tolerance = np.finfo(float).eps * max(matrix.shape) * singular_values[0]
-    assert np.sum(singular_values > tolerance) == 4, "The supplied points and normals do not determine a unique conic"
-
-    coefficient_scale = max(abs(A), abs(B), abs(C), abs(D), abs(E))
-    assert coefficient_scale != 0.0, "Failed to construct a valid conic"
-    A /= coefficient_scale
-    B /= coefficient_scale
-    C /= coefficient_scale
-    D /= coefficient_scale
-    E /= coefficient_scale
-
-    def to_3d(along: float, across: float) -> hou.Vector3:
-        return vector0 + along * along_axis + across * across_axis
-
-    def evaluate(along: float) -> tuple[tuple[hou.Vector3, hou.Vector3], ...]:
-        def get_point_and_normal(p_across: float) -> tuple[hou.Vector3, hou.Vector3]:
-            gradient_along = 2.0 * A * along + B * p_across + D
-            gradient_across = B * along + 2.0 * C * p_across + E
-            curvature = (
-               ( 2.0 * A) * gradient_across ** 2
-                - 2.0 * B * gradient_along * gradient_across
-                + (2.0 * C) * gradient_along ** 2
-            )
-            point_normal = (
-                along_axis * gradient_along
-                + across_axis * gradient_across
-            ).normalized()
-            if curvature > 0.0:
-                point_normal = -point_normal
-            point = to_3d(along, p_across)
-            return point, point_normal
-
-        quadratic = C
-        linear = B * along + E
-        constant = A * along**2 + D * along
-        eps = 1e-12
-
-        if abs(quadratic) <= eps:
-            if abs(linear) <= eps:
-                return ()
-            across = -constant / linear
-            return get_point_and_normal(across),
-
-        discriminant = linear**2 - 4.0 * quadratic * constant
-        if discriminant < -eps:
-            return ()
-
-        if abs(discriminant) <= eps:
-            across = -linear / (2.0 * quadratic)
-            return get_point_and_normal(across),
-
-        sqrt_discriminant = math.sqrt(discriminant)
-        across0 = (-linear + sqrt_discriminant) / (2.0 * quadratic)
-        across1 = (-linear - sqrt_discriminant) / (2.0 * quadratic)
-        return get_point_and_normal(across0), get_point_and_normal(across1)
-
-    return evaluate
+    See `internal.elliptical_interpolator.interpolate_conic`.
+    """
+    return elliptical_interpolator.interpolate_conic(p0, p1, p2, normal0, normal1)
 
 
 def interpolate_elliptical(
@@ -478,214 +448,7 @@ def interpolate_elliptical(
         normal0: hou.Vector3,
         normal2: hou.Vector3,
 ) -> Callable[[float], tuple[hou.Vector3, hou.Vector3]]:
-    """Construct a smooth elliptical 3D bulge passing through p0, p1, p2 with normals normal0 at p0 and normal2 at p2.
-
-    The middle point p1 is explicitly treated as the apex/tip of the bulge relative to the baseline from p0 to p2.
-    The curve is composed of two quintic polynomial segments (p0 -> p1 and p1 -> p2) joined at p1 with C² continuity.
-    Tangent magnitudes and apex curvature are chosen by minimizing jerk energy.
-
-    :param p0: Start point of the curve (t = 0.0).
-    :param p1: Apex/peak point of the curve (bulge tip).
-    :param p2: End point of the curve (t = 1.0).
-    :param normal0: Inward normal vector at p0.
-    :param normal2: Inward normal vector at p2.
-    :return: A function that accepts a normalized parameter t in [0, 1]
-            representing progress along the p0->p2 baseline chord axis (where 0.0 is p0 and 1.0 is p2),
-            and returns the (position, in-plane inward normal) pair as hou.Vector3.
     """
-    p0_arr, p1_arr, p2_arr = _to_np(p0), _to_np(p1), _to_np(p2)
-    tangent_apex = _normalized(p2_arr - p0_arr)
-    chord_length = np.linalg.norm(p2_arr - p0_arr)
-    mid_along = float(np.dot(p1_arr - p0_arr, tangent_apex))
-
-    height_vec = (p1_arr - p0_arr) - mid_along * tangent_apex
-    height = np.linalg.norm(height_vec)
-    assert height > 1e-6, "p1 must not be collinear with p0 and p2"
-    outward = height_vec / height
-    inward = -outward
-
-    plane_normal = _normalized(np.cross(tangent_apex, outward))
-
-    d0 = _normalized(np.cross(plane_normal, _project_on_plane(_to_np(normal0), plane_normal)))
-    d2 = _normalized(np.cross(plane_normal, _project_on_plane(_to_np(normal2), plane_normal)))
-
-    def build_spline(parameters: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        endpoint_speed, apex_speed, apex_accel = np.exp(np.clip(parameters, -20.0, 20.0))
-        vel0, vel1, vel2 = endpoint_speed * d0, apex_speed * tangent_apex, endpoint_speed * d2
-        acc0, acc1, acc2 = np.zeros(3), apex_accel * inward, np.zeros(3)
-        return (
-            _quintic_coefficients(p0_arr, vel0, acc0, p1_arr, vel1, acc1),
-            _quintic_coefficients(p1_arr, vel1, acc1, p2_arr, vel2, acc2),
-        )
-
-    def objective(parameters: np.ndarray) -> float:
-        left, right = build_spline(parameters)
-        return _jerk_energy(left) + _jerk_energy(right)
-
-    x0 = np.log([chord_length * 0.5, chord_length * 0.5, max(4.0 * height, 1e-6)])
-    best_x = _bfgs_minimize(objective, x0)
-    left_coeff, right_coeff = build_spline(best_x)
-
-    def evaluate(t: float) -> tuple[hou.Vector3, hou.Vector3]:
-        t = float(np.clip(t, 0.0, 1.0))
-        target_along = t * chord_length
-
-        if target_along <= mid_along:
-            sub_t = _solve_t_for_along(left_coeff, p0_arr, tangent_apex, target_along)
-            pos, vel = _eval_quintic(left_coeff, sub_t)
-        else:
-            sub_t = _solve_t_for_along(right_coeff, p0_arr, tangent_apex, target_along)
-            pos, vel = _eval_quintic(right_coeff, sub_t)
-
-        tangent = _normalized(vel) if np.linalg.norm(vel) > 1e-12 else tangent_apex
-        in_plane_normal = np.cross(tangent, plane_normal)
-        in_plane_normal = _normalized(in_plane_normal) if np.linalg.norm(in_plane_normal) > 1e-12 else inward
-
-        return hou.Vector3(pos), hou.Vector3(in_plane_normal)
-
-    return evaluate
-
-def _to_np(v: hou.Vector3 | hou.Point | Sequence[float] | np.ndarray) -> np.ndarray:
-    return np.array(v.position() if isinstance(v, hou.Point) else v, dtype=float)
-
-def _normalized(v: np.ndarray) -> np.ndarray:
-    length = np.linalg.norm(v)
-    assert length > 1e-6, "Expected non-zero vector for normalization"
-    return v / length
-
-def _project_on_plane(v: np.ndarray, normal: np.ndarray) -> np.ndarray:
-    return _normalized(v - np.dot(v, normal) * normal)
-
-def _quintic_coefficients(
-        p0: np.ndarray,
-        v0: np.ndarray,
-        a0: np.ndarray,
-        p1: np.ndarray,
-        v1: np.ndarray,
-        a1: np.ndarray,
-) -> np.ndarray:
-    """Construct quintic polynomial C(t) = c0 + c1*t + ... + c5*t^5 for t in [0, 1]."""
-    dp = p1 - p0
-    c0 = p0
-    c1 = v0
-    c2 = 0.5 * a0
-    c3 = 10.0 * dp - 6.0 * v0 - 4.0 * v1 - 1.5 * a0 + 0.5 * a1
-    c4 = -15.0 * dp + 8.0 * v0 + 7.0 * v1 + 1.5 * a0 - a1
-    c5 = 6.0 * dp - 3.0 * (v0 + v1) - 0.5 * (a0 - a1)
-    return np.vstack([c0, c1, c2, c3, c4, c5])
-
-def _jerk_energy(coeff: np.ndarray) -> float:
-    """Compute exact integral of ||C'''(t)||^2 dt from 0 to 1 for a quintic polynomial."""
-    A = 6.0 * coeff[3]
-    B = 24.0 * coeff[4]
-    C = 60.0 * coeff[5]
-
-    return float(
-        np.dot(A, A)
-        + np.dot(A, B)
-        + (2.0 / 3.0) * np.dot(A, C)
-        + (1.0 / 3.0) * np.dot(B, B)
-        + 0.5 * np.dot(B, C)
-        + 0.2 * np.dot(C, C)
-    )
-
-def _eval_quintic(coeff: np.ndarray, t: float) -> tuple[np.ndarray, np.ndarray]:
-    """Evaluate position and velocity of quintic polynomial at scalar t."""
-    t2 = t * t
-    t3 = t2 * t
-    t4 = t3 * t
-    t5 = t4 * t
-
-    pos = coeff[0] + coeff[1] * t + coeff[2] * t2 + coeff[3] * t3 + coeff[4] * t4 + coeff[5] * t5
-    vel = coeff[1] + 2.0 * coeff[2] * t + 3.0 * coeff[3] * t2 + 4.0 * coeff[4] * t3 + 5.0 * coeff[5] * t4
-    return pos, vel
-
-def _solve_t_for_along(coeff: np.ndarray, p0: np.ndarray, along_axis: np.ndarray, target_along: float) -> float:
-    """Solve for parameter t in [0, 1] such that (C(t) - p0) . along_axis = target_along."""
-    k = np.dot(coeff, along_axis)
-    k[0] -= (np.dot(p0, along_axis) + target_along)
-
-    val0 = k[0]
-    val1 = float(np.sum(k))
-    if val0 * val1 >= 0.0:
-        return 0.0 if abs(val0) < abs(val1) else 1.0
-
-    low, high = 0.0, 1.0
-    t = max(0.0, min(1.0, -val0 / (val1 - val0)))
-    for _ in range(25):
-        t2 = t * t
-        t3 = t2 * t
-        t4 = t3 * t
-        t5 = t4 * t
-        val = k[0] + k[1] * t + k[2] * t2 + k[3] * t3 + k[4] * t4 + k[5] * t5
-        if abs(val) < 1e-12:
-            break
-        if val < 0.0:
-            low = t
-        else:
-            high = t
-        dval = k[1] + 2.0 * k[2] * t + 3.0 * k[3] * t2 + 4.0 * k[4] * t3 + 5.0 * k[5] * t4
-        if abs(dval) > 1e-12:
-            t_new = t - val / dval
-            if low < t_new < high:
-                t = t_new
-            else:
-                t = 0.5 * (low + high)
-        else:
-            t = 0.5 * (low + high)
-
-    return float(t)
-
-def _bfgs_minimize(
-        f: Callable[[np.ndarray], float],
-        x0: np.ndarray | list[float],
-        max_iter: int = 200,
-        gtol: float = 1e-5,
-        eps: float = 1e-6,
-) -> np.ndarray:
-    x = np.array(x0, dtype=float)
-    n = len(x)
-    H = np.eye(n)
-
-    def grad(x_curr: np.ndarray) -> np.ndarray:
-        g = np.zeros(n)
-        for i in range(n):
-            dx = np.zeros(n)
-            dx[i] = eps
-            g[i] = (f(x_curr + dx) - f(x_curr - dx)) / (2.0 * eps)
-        return g
-
-    fx = f(x)
-    g = grad(x)
-
-    for _ in range(max_iter):
-        if np.linalg.norm(g) < gtol:
-            break
-        p = -H @ g
-        alpha = 1.0
-        c1 = 1e-4
-        while alpha > 1e-8:
-            if f(x + alpha * p) <= fx + c1 * alpha * np.dot(g, p):
-                break
-            alpha *= 0.5
-
-        x_next = x + alpha * p
-        fx_next = f(x_next)
-        g_next = grad(x_next)
-
-        s = x_next - x
-        y = g_next - g
-        ys = np.dot(y, s)
-
-        if ys > 1e-10:
-            rho = 1.0 / ys
-            I = np.eye(n)
-            H = (I - rho * np.outer(s, y)) @ H @ (I - rho * np.outer(y, s)) + rho * np.outer(s, s)
-        else:
-            H = np.eye(n)
-
-        x, fx, g = x_next, fx_next, g_next
-        if np.linalg.norm(s) < 1e-8:
-            break
-
-    return x
+    See `internal.elliptical_interpolator.interpolate_elliptical`.
+    """
+    return elliptical_interpolator.interpolate_elliptical(p0, p1, p2, normal0, normal2)
