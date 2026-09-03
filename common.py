@@ -233,6 +233,13 @@ def get_parent(node: hou.Node) -> hou.OpNode:
     return parent
 
 
+def get_control(node: hou.Node) -> hou.OpNode:
+    target = node if node.isSubNetwork() else get_parent(node)
+    control = target.node("CONTROL")
+    assert control is not None, f"Expected CONTROL node under {target}"
+    return control
+
+
 def get_float_parm(node: hou.OpNode, name: str) -> float:
     return get_parm(node, name, float)
 

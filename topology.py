@@ -25,31 +25,68 @@ def inset(
 
     - Groups primitives into connected components and insets each component independently.
     - Offsets boundary vertices inward by distance or ratio and generates border quad faces (trapezoids).
+    - If scalar is negative, delegates to outset.
     - Preserves primitive attributes and primitive group memberships across divided primitives.
     - Preserves point attributes and group memberships on newly generated inset points.
 
     :param prims: List of polygon primitives to inset.
-    :param scalar: Offset ratio (in [0, 1]) or world distance.
+    :param scalar: Offset ratio (in [0, 1]) or world distance. Negative values trigger outset.
     :param use_ratio: If True, scalar is interpreted as a ratio; otherwise as absolute distance.
     :return: List of inner inset primitives.
     """
-    if not prims:
-        return []
+    if not prims or scalar == 0:
+        return prims
+    if scalar < 0:
+        return outset(prims, -scalar, use_ratio)
 
     geo = prims[0].geometry()
     components = partition_connected_prims(prims)
 
     inner_prims: list[hou.Prim] = []
     for comp in components:
-        inner_prims.extend(_inset_connected(geo, comp, scalar, use_ratio))
+        inner_prims.extend(_offset_connected(geo, comp, scalar, use_ratio, is_outset=False))
 
     return inner_prims
 
-def _inset_connected(
+
+def outset(
+        prims: list[hou.Prim],
+        scalar: float,
+        use_ratio: bool = True,
+) -> list[hou.Prim]:
+    """Perform an outset operation on a collection of polygon primitives.
+
+    - Groups primitives into connected components and outsets each component independently.
+    - Offsets boundary vertices outward by distance or ratio and generates border quad faces around the exterior.
+    - If scalar is negative, delegates to inset.
+    - Preserves primitive attributes and primitive group memberships on newly created border primitives.
+    - Preserves point attributes and group memberships on newly generated outset points.
+
+    :param prims: List of polygon primitives to outset.
+    :param scalar: Offset ratio or world distance. Negative values trigger inset.
+    :param use_ratio: If True, scalar is interpreted as a ratio; otherwise as absolute distance.
+    :return: List of newly generated outer border quad primitives.
+    """
+    if not prims or scalar == 0:
+        return []
+    if scalar < 0:
+        return inset(prims, -scalar, use_ratio)
+
+    geo = prims[0].geometry()
+    components = partition_connected_prims(prims)
+
+    outer_prims: list[hou.Prim] = []
+    for comp in components:
+        outer_prims.extend(_offset_connected(geo, comp, scalar, use_ratio, is_outset=True))
+
+    return outer_prims
+
+def _offset_connected(
         geo: hou.Geometry,
         island: list[hou.Prim],
         scalar: float,
         is_scalar_ratio: bool,
+        is_outset: bool = False,
 ) -> list[hou.Prim]:
     edge_counts = get_edge_prim_count(island)
 
@@ -68,7 +105,7 @@ def _inset_connected(
                 outgoing_boundary_edge[u] = (v, p, edge_len)
                 incoming_boundary_edge[v] = (u, p, edge_len)
 
-    inset_point_map: dict[hou.Point, hou.Point] = {}
+    offset_point_map: dict[hou.Point, hou.Point] = {}
     for pt in incoming_boundary_edge:
         u, p_in, l_in = incoming_boundary_edge[pt]
         w, p_out, l_out = outgoing_boundary_edge[pt]
@@ -99,26 +136,40 @@ def _inset_connected(
         else:
             delta_v = (n1 + n2).normalized() * ((d1 + d2) * 0.5)
 
+        if is_outset:
+            delta_v = -delta_v
+
         new_pt = geo.createPoint()
         new_pt.setPosition(pos + delta_v)
         copy_point_data(pt, new_pt)
-        inset_point_map[pt] = new_pt
+        offset_point_map[pt] = new_pt
 
     attr_data = collect_prim_attrs(island)
-
     prim_attr_map = dict(zip(island, attr_data))
+
+    if is_outset:
+        border_face_points: list[list[hou.Point]] = []
+        border_attribs: list[tuple[dict[str, Any], list[str]]] = []
+        for p in island:
+            for u, v in boundary_edges_by_prim[p]:
+                u_prime = offset_point_map[u]
+                v_prime = offset_point_map[v]
+                border_face_points.append([u, u_prime, v_prime, v])
+                border_attribs.append(prim_attr_map[p])
+        return fill_faces(border_face_points, border_attribs)
+
     inner_face_points: list[list[hou.Point]] = []
     inner_attribs: list[tuple[dict[str, Any], list[str]]] = []
     border_face_points: list[list[hou.Point]] = []
     border_attribs: list[tuple[dict[str, Any], list[str]]] = []
     for p in island:
         pts = [v.point() for v in p.vertices()]
-        inner_pts = [inset_point_map.get(pt, pt) for pt in pts]
+        inner_pts = [offset_point_map.get(pt, pt) for pt in pts]
         inner_face_points.append(inner_pts)
         inner_attribs.append(prim_attr_map[p])
         for u, v in boundary_edges_by_prim[p]:
-            u_prime = inset_point_map[u]
-            v_prime = inset_point_map[v]
+            u_prime = offset_point_map[u]
+            v_prime = offset_point_map[v]
             border_face_points.append([u, v, v_prime, u_prime])
             border_attribs.append(prim_attr_map[p])
 

@@ -135,7 +135,8 @@ def indexed_attr_range(
 def fill_face_by_attr(
     geo: hou.Geometry,
     attribute: str,
-    values: list[str],
+    values: Sequence[str],
+    reverse: bool = False,
 ) -> hou.Polygon:
     all_points = points_by_unique_attr(geo, attribute)
     face_points: list[hou.Point] = []
@@ -143,7 +144,7 @@ def fill_face_by_attr(
         p = all_points.get(v)
         assert p is not None, f"Expected point with id {v}"
         face_points.append(p)
-    return fill_face(geo, face_points)
+    return fill_face(geo, face_points, reverse)
 
 
 def attribute_after_inset(
